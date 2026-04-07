@@ -18,7 +18,9 @@ npx godot-lsp-cli <command>
 
 ## Prerequisites
 
-Godot's LSP server must be running. Start it headless in a separate terminal:
+Godot's LSP server must be running. If you already have the Godot editor open with your project, **the LSP is already running on port 6005** — no extra setup needed.
+
+If you want to run without the editor (CI, background sessions):
 
 ```bash
 godot --editor --headless --lsp-port 6005 --path /path/to/your/project
