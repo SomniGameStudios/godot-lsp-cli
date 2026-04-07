@@ -223,11 +223,21 @@ export class GodotLspClient {
     return result.contents.value ?? null;
   }
 
-  async workspaceSymbols(query: string): Promise<SymbolInformation[]> {
-    const result = await this.transport.request("workspace/symbol", {
-      query,
+  async declaration(file: string, line: number, character: number): Promise<Location | Location[] | null> {
+    const uri = await this.ensureOpen(file);
+    const result = await this.transport.request("textDocument/declaration", {
+      textDocument: { uri },
+      position: { line, character },
     });
-    return (result as SymbolInformation[]) ?? [];
+    return (result as Location | Location[]) ?? null;
+  }
+
+  async nativeSymbol(nativeClass: string, symbolName?: string): Promise<unknown> {
+    const result = await this.transport.request("textDocument/nativeSymbol", {
+      native_class: nativeClass,
+      symbol_name: symbolName ?? nativeClass,
+    });
+    return result;
   }
 
   getDiagnostics(file?: string): Map<string, Diagnostic[]> | Diagnostic[] {

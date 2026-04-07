@@ -27,10 +27,12 @@ Commands:
   rename <file> <line> <col> <newName>   Rename symbol across project
   references <file> <line> <col>         Find all references to symbol
   definition <file> <line> <col>         Go to definition
+  declaration <file> <line> <col>        Go to declaration
   symbols <file>                         List symbols in file
   hover <file> <line> <col>              Get hover info for symbol
+  native-symbol <class> [member]         Get docs for Godot built-in class/member
   diagnostics [file]                     Show diagnostics (errors/warnings)
-  workspace-symbols <query>              Search symbols across workspace
+  capabilities                           Show LSP server capabilities
 
 Options:
   --host <host>       LSP server host (default: 127.0.0.1)
@@ -228,6 +230,26 @@ async function main() {
         break;
       }
 
+      case "declaration": {
+        if (args.length < 3) {
+          console.error("Usage: godot-lsp-cli declaration <file> <line> <col>");
+          process.exit(1);
+        }
+        const [file, line, col] = args;
+        const result = await client.declaration(resolveFile(file, project), parseInt(line), parseInt(col));
+        if (json) {
+          console.log(JSON.stringify(decodeUris(result), null, 2));
+        } else if (!result) {
+          console.log("No declaration found.");
+        } else {
+          const locs = Array.isArray(result) ? result : [result];
+          for (const loc of locs) {
+            console.log(formatLocation(loc));
+          }
+        }
+        break;
+      }
+
       case "symbols": {
         if (args.length < 1) {
           console.error("Usage: godot-lsp-cli symbols <file>");
@@ -289,19 +311,26 @@ async function main() {
         break;
       }
 
-      case "workspace-symbols": {
+      case "native-symbol": {
         if (args.length < 1) {
-          console.error("Usage: godot-lsp-cli workspace-symbols <query>");
+          console.error("Usage: godot-lsp-cli native-symbol <class> [member]");
           process.exit(1);
         }
-        const query = args.join(" ");
-        const result = await client.workspaceSymbols(query);
+        const [nativeClass, memberName] = args;
+        const result = await client.nativeSymbol(nativeClass, memberName);
         if (json) {
           console.log(JSON.stringify(decodeUris(result), null, 2));
-        } else if (result.length === 0) {
-          console.log("No symbols found.");
+        } else if (!result) {
+          console.log("No documentation found.");
         } else {
-          printSymbols(result);
+          const sym = result as { name: string; detail?: string; documentation?: string; children?: unknown[] };
+          console.log(`${sym.name}${sym.detail ? ` — ${sym.detail}` : ""}`);
+          if (sym.documentation) {
+            console.log(`\n${sym.documentation}`);
+          }
+          if (sym.children && !memberName) {
+            console.log(`\nMembers: ${sym.children.length}`);
+          }
         }
         break;
       }
