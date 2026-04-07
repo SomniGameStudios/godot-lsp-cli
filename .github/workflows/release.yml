@@ -37,7 +37,7 @@ jobs:
         shell: bash
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: godot-lsp-cli-${{ matrix.target }}
           path: godot-lsp-cli${{ matrix.os == 'windows-latest' && '.exe' || '' }}
@@ -49,7 +49,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v6
 
       - name: Create release
         uses: softprops/action-gh-release@v2
