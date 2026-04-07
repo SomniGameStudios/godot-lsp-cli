@@ -114,6 +114,21 @@ godot-lsp-cli capabilities --project .
 | Native class docs | Yes |
 | Workspace symbols | No |
 
+## Why this exists
+
+We investigated the existing Godot MCP ecosystem before building this:
+
+- [Coding-Solo/godot-mcp](https://github.com/Coding-Solo/godot-mcp) — scene builder, 15 tools, no code intelligence
+- [Derfirm/godot-mcp](https://github.com/Derfirm/godot-mcp) — 54-75 tools, no LSP, stale
+- [tomyud1/godot-mcp](https://github.com/tomyud1/godot-mcp) — 42 tools, file-level rename only
+- [youichi-uda/godot-mcp-pro](https://github.com/youichi-uda/godot-mcp-pro) — 35-169 tools, text-search "references"
+
+**None of them use Godot's built-in LSP.** They're all scene manipulation / game control tools with text-pattern-based search. No semantic rename, no real find-references, no go-to-definition.
+
+We then studied the [official Godot VSCode plugin](https://github.com/godotengine/godot-vscode-plugin) and found that the entire LSP connection is ~200 lines of TCP + JSON-RPC framing. The plugin itself doesn't even use rename or references — but the Godot LSP supports them.
+
+So we built this: a lightweight CLI (~400 lines) that talks directly to Godot's LSP for the operations that matter for code refactoring. Zero runtime dependencies, zero MCP overhead.
+
 ## How it works
 
 Connects to Godot's LSP over TCP using the standard LSP JSON-RPC protocol. The transport layer is adapted from the [official Godot VSCode plugin](https://github.com/godotengine/godot-vscode-plugin).
