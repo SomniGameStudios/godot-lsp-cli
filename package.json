@@ -1,14 +1,32 @@
 {
   "name": "godot-lsp-cli",
   "version": "0.1.0",
-  "description": "CLI tool that talks to Godot's built-in LSP for code refactoring",
+  "description": "CLI that talks to Godot's built-in LSP — rename symbols, find references, go to definition",
   "license": "MIT",
+  "keywords": [
+    "godot",
+    "gdscript",
+    "lsp",
+    "refactoring",
+    "language-server",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SomniGameStudios/godot-lsp-cli"
+  },
   "bin": {
     "godot-lsp-cli": "./dist/cli.js"
   },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
