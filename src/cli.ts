@@ -11,14 +11,31 @@
  *   godot-lsp-cli hover <file> <line> <col>
  *   godot-lsp-cli diagnostics [file]
  *   godot-lsp-cli workspace-symbols <query>
+ *   godot-lsp-cli serve --project <path>
+ *   godot-lsp-cli stop --project <path>
+ *   godot-lsp-cli list
  *
  * Lines and columns are 0-based (LSP convention).
  * Requires Godot editor or headless LSP running:
  *   godot --editor --headless --lsp-port 6005 --path /your/project
+ * or managed via `godot-lsp-cli serve --project <path>`.
  */
 
+import * as path from "path";
+import * as fs from "fs";
+import { spawn } from "child_process";
 import { GodotLspClient, symbolKindName } from "./client.js";
 import type { WorkspaceEdit, Location, DocumentSymbol, SymbolInformation, Diagnostic, Range } from "./client.js";
+import {
+  readRegistry,
+  findLiveEntry,
+  upsertEntry,
+  removeEntry,
+  pickFreePort,
+  ensureDirs,
+  logFilePath,
+} from "./instances.js";
+import type { InstanceEntry } from "./instances.js";
 
 function usage(): never {
   console.error(`godot-lsp-cli v0.1.0 — CLI for Godot's built-in LSP
@@ -34,16 +51,31 @@ Commands:
   diagnostics [file]                     Show diagnostics (errors/warnings)
   capabilities                           Show LSP server capabilities
 
+  serve --project <path>                 Start (or reuse) a managed Godot LSP instance for a project
+  stop --project <path> | --all          Stop managed instance(s)
+  list                                   List managed Godot LSP instances
+
 Options:
   --host <host>       LSP server host (default: 127.0.0.1)
   --port <port>       LSP server port (default: 6005)
-  --project <path>    Godot project root (improves LSP results)
+  --project <path>    Godot project root (improves LSP results, enables instance routing)
   --json              Output as JSON instead of human-readable text
+
+serve-only options:
+  --godot <bin>       Path to the Godot binary (default: $GODOT_BIN, then "godot" on PATH)
+  --timeout <sec>     Seconds to wait for the LSP to become ready (default: 180)
 
 Lines and columns are 0-based (LSP convention).
 
+Port routing for all non-management commands:
+  1. --port, if given, always wins
+  2. else, if --project matches a live "serve"-managed instance, its port is used
+  3. else, the default port 6005 is used (same as before instance management existed)
+
 Requires Godot LSP running:
-  godot --editor --headless --lsp-port 6005 --path /your/project`);
+  godot --editor --headless --lsp-port 6005 --path /your/project
+or managed via:
+  godot-lsp-cli serve --project /your/project`);
   process.exit(1);
 }
 
@@ -52,17 +84,19 @@ function parseArgs(argv: string[]): {
   args: string[];
   host: string;
   port: number;
+  portExplicit: boolean;
   project: string | undefined;
   json: boolean;
 } {
   const host = extractFlag(argv, "--host") ?? "127.0.0.1";
-  const port = parseInt(extractFlag(argv, "--port") ?? "6005", 10);
+  const portRaw = extractFlag(argv, "--port");
+  const port = parseInt(portRaw ?? "6005", 10);
   const project = extractFlag(argv, "--project") ?? undefined;
   const json = removeFlag(argv, "--json");
 
   const command = argv[0] ?? "";
   const args = argv.slice(1);
-  return { command, host, port, project, json, args };
+  return { command, host, port, portExplicit: portRaw !== null, project, json, args };
 }
 
 function extractFlag(argv: string[], flag: string): string | null {
@@ -134,27 +168,167 @@ function decodeUris(obj: unknown): unknown {
 }
 
 function resolveFile(file: string, project?: string): string {
-  const p = require("path");
   // If it's already absolute, use as-is
-  if (p.isAbsolute(file)) return file;
+  if (path.isAbsolute(file)) return file;
   // If --project is set, resolve relative to it
-  if (project) return p.resolve(project, file);
+  if (project) return path.resolve(project, file);
   // Otherwise resolve from cwd
-  return p.resolve(file);
+  return path.resolve(file);
+}
+
+function resolveProjectPath(project: string): string {
+  return path.resolve(project);
+}
+
+function formatEntry(entry: InstanceEntry, status: string): string {
+  return `${entry.project}  port=${entry.port}  pid=${entry.pid}  status=${status}  started=${entry.startedAt}`;
+}
+
+async function attemptLspHandshake(host: string, port: number, project: string, attemptTimeoutMs: number): Promise<boolean> {
+  const client = new GodotLspClient();
+  const timeout = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), attemptTimeoutMs));
+  const attempt = (async () => {
+    try {
+      await client.connect(host, port, project);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  const ok = await Promise.race([attempt, timeout]);
+  client.disconnect();
+  return ok;
+}
+
+async function waitForLsp(host: string, port: number, project: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await attemptLspHandshake(host, port, project, 5000)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return false;
+}
+
+async function cmdServe(args: string[], projectFlag: string | undefined, port: number, portExplicit: boolean): Promise<void> {
+  if (!projectFlag) {
+    console.error("Usage: godot-lsp-cli serve --project <path> [--port N] [--godot <bin>] [--timeout <sec>]");
+    process.exit(1);
+  }
+  const project = resolveProjectPath(projectFlag);
+  const godotBin = extractFlag(args, "--godot") ?? process.env.GODOT_BIN ?? "godot";
+  const timeoutSec = parseInt(extractFlag(args, "--timeout") ?? "180", 10);
+
+  const existing = await findLiveEntry(project);
+  if (existing) {
+    console.log(`Already running: ${formatEntry(existing, "live")}`);
+    return;
+  }
+
+  const targetPort = portExplicit ? port : await pickFreePort();
+
+  ensureDirs();
+  const logPath = logFilePath(project);
+  const logFd = fs.openSync(logPath, "a");
+
+  const child = spawn(godotBin, ["--headless", "--editor", "--path", project, "--lsp-port", String(targetPort)], {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+  });
+
+  let spawnError: Error | null = null;
+  child.on("error", (err) => {
+    spawnError = err;
+  });
+  child.unref();
+
+  console.log(`Starting Godot LSP for ${project} on port ${targetPort} (pid ${child.pid})...`);
+  console.log("A fresh project may run a one-time asset import; this can take several minutes.");
+
+  const ok = await waitForLsp("127.0.0.1", targetPort, project, timeoutSec * 1000);
+
+  if (spawnError) {
+    console.error(`Failed to start "${godotBin}": ${(spawnError as Error).message}`);
+    console.error("Set the Godot binary with --godot <bin>, the GODOT_BIN env var, or ensure \"godot\" is on PATH.");
+    process.exit(1);
+  }
+
+  if (!ok) {
+    console.error(`Timed out waiting for Godot LSP on port ${targetPort} after ${timeoutSec}s. Check log: ${logPath}`);
+    process.exit(1);
+  }
+
+  const entry: InstanceEntry = {
+    project,
+    port: targetPort,
+    pid: child.pid!,
+    godotBin,
+    startedAt: new Date().toISOString(),
+  };
+  await upsertEntry(entry);
+  console.log(`Ready: ${formatEntry(entry, "live")}`);
+}
+
+async function cmdStop(args: string[], projectFlag: string | undefined): Promise<void> {
+  const all = removeFlag(args, "--all");
+  if (!all && !projectFlag) {
+    console.error("Usage: godot-lsp-cli stop --project <path> | --all");
+    process.exit(1);
+  }
+
+  const entries = await readRegistry();
+  const targets = all ? entries : entries.filter((e) => e.project === resolveProjectPath(projectFlag!));
+
+  if (targets.length === 0) {
+    console.log("No matching running instance(s) found.");
+    return;
+  }
+
+  for (const entry of targets) {
+    try {
+      process.kill(entry.pid, "SIGTERM");
+      console.log(`Stopped ${entry.project} (port ${entry.port}, pid ${entry.pid})`);
+    } catch (err) {
+      console.log(`Could not signal pid ${entry.pid} for ${entry.project}: ${(err as Error).message}`);
+    }
+    await removeEntry(entry.project);
+  }
+}
+
+async function cmdList(): Promise<void> {
+  const entries = await readRegistry();
+  if (entries.length === 0) {
+    console.log("No registered Godot LSP instances.");
+    return;
+  }
+  for (const entry of entries) {
+    console.log(formatEntry(entry, "live"));
+  }
 }
 
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.length === 0) usage();
 
-  const { command, args, host, port, project, json } = parseArgs(argv);
+  const { command, args, host, port, portExplicit, project, json } = parseArgs(argv);
+
+  if (command === "serve") return cmdServe(args, project, port, portExplicit);
+  if (command === "stop") return cmdStop(args, project);
+  if (command === "list") return cmdList();
+
+  let resolvedPort = port;
+  if (!portExplicit && project) {
+    const entry = await findLiveEntry(resolveProjectPath(project));
+    if (entry) resolvedPort = entry.port;
+  }
+
   const client = new GodotLspClient();
 
   try {
-    await client.connect(host, port, project);
+    await client.connect(host, resolvedPort, project);
   } catch (err) {
-    console.error(`Failed to connect to Godot LSP at ${host}:${port}`);
-    console.error(`Make sure Godot is running with: godot --editor --headless --lsp-port ${port} --path /your/project`);
+    console.error(`Failed to connect to Godot LSP at ${host}:${resolvedPort}`);
+    console.error(`Make sure Godot is running with: godot --editor --headless --lsp-port ${resolvedPort} --path /your/project`);
+    console.error(`Or start a managed instance: godot-lsp-cli serve --project <path>`);
     process.exit(1);
   }
 
