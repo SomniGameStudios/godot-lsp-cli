@@ -1,6 +1,6 @@
 {
   "name": "godot-lsp-cli",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "CLI that talks to Godot's built-in LSP — rename symbols, find references, go to definition",
   "license": "MIT",
   "keywords": [
