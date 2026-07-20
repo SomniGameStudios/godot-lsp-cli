@@ -38,7 +38,7 @@ import {
 import type { InstanceEntry } from "./instances.js";
 
 function usage(): never {
-  console.error(`godot-lsp-cli v0.1.0 — CLI for Godot's built-in LSP
+  console.error(`godot-lsp-cli v0.2.0 — CLI for Godot's built-in LSP
 
 Commands:
   rename <file> <line> <col> <newName>   Rename symbol across project
