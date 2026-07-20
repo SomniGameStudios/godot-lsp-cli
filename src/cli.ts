@@ -34,6 +34,7 @@ import {
   pickFreePort,
   ensureDirs,
   logFilePath,
+  isPortOpen,
 } from "./instances.js";
 import type { InstanceEntry } from "./instances.js";
 
@@ -200,9 +201,10 @@ async function attemptLspHandshake(host: string, port: number, project: string, 
   return ok;
 }
 
-async function waitForLsp(host: string, port: number, project: string, timeoutMs: number): Promise<boolean> {
+async function waitForLsp(host: string, port: number, project: string, timeoutMs: number, shouldAbort: () => boolean): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (shouldAbort()) return false;
     if (await attemptLspHandshake(host, port, project, 5000)) return true;
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
@@ -224,6 +226,10 @@ async function cmdServe(args: string[], projectFlag: string | undefined, port: n
     return;
   }
 
+  if (portExplicit && (await isPortOpen(port))) {
+    console.error(`Port ${port} is already in use; another server may be listening there. Omit --port to pick a free port automatically.`);
+    process.exit(1);
+  }
   const targetPort = portExplicit ? port : await pickFreePort();
 
   ensureDirs();
@@ -235,25 +241,34 @@ async function cmdServe(args: string[], projectFlag: string | undefined, port: n
     stdio: ["ignore", logFd, logFd],
   });
 
-  let spawnError: Error | null = null;
+  let childFailed: string | null = null;
   child.on("error", (err) => {
-    spawnError = err;
+    childFailed = childFailed ?? `Failed to start "${godotBin}": ${err.message}`;
+  });
+  child.on("exit", (code) => {
+    childFailed = childFailed ?? `Godot exited before the LSP became ready (code ${code}). Check log: ${logPath}`;
   });
   child.unref();
 
   console.log(`Starting Godot LSP for ${project} on port ${targetPort} (pid ${child.pid})...`);
   console.log("A fresh project may run a one-time asset import; this can take several minutes.");
 
-  const ok = await waitForLsp("127.0.0.1", targetPort, project, timeoutSec * 1000);
+  const ok = await waitForLsp("127.0.0.1", targetPort, project, timeoutSec * 1000, () => childFailed !== null);
 
-  if (spawnError) {
-    console.error(`Failed to start "${godotBin}": ${(spawnError as Error).message}`);
+  if (childFailed) {
+    console.error(childFailed as string);
     console.error("Set the Godot binary with --godot <bin>, the GODOT_BIN env var, or ensure \"godot\" is on PATH.");
     process.exit(1);
   }
 
   if (!ok) {
-    console.error(`Timed out waiting for Godot LSP on port ${targetPort} after ${timeoutSec}s. Check log: ${logPath}`);
+    if (child.pid) {
+      try {
+        process.kill(child.pid, "SIGTERM");
+      } catch {}
+    }
+    console.error(`Timed out waiting for Godot LSP on port ${targetPort} after ${timeoutSec}s; stopped the spawned process (pid ${child.pid}). Check log: ${logPath}`);
+    console.error("A first-time asset import can take longer; retry with a higher --timeout <sec>.");
     process.exit(1);
   }
 

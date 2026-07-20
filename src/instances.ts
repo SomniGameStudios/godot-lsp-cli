@@ -90,6 +90,42 @@ async function isLive(entry: InstanceEntry): Promise<boolean> {
   return isPortOpen(entry.port);
 }
 
+/**
+ * Serializes registry writes across processes via a lock directory, so
+ * concurrent serve/stop commands cannot drop each other's entries.
+ */
+async function withLock<T>(fn: () => T): Promise<T> {
+  fs.mkdirSync(baseDir(), { recursive: true });
+  const lockDir = path.join(baseDir(), "registry.lock");
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    try {
+      fs.mkdirSync(lockDir);
+      break;
+    } catch {
+      try {
+        if (Date.now() - fs.statSync(lockDir).mtimeMs > 10000) {
+          fs.rmdirSync(lockDir);
+          continue;
+        }
+      } catch {}
+      if (Date.now() > deadline) throw new Error(`Timed out waiting for registry lock: ${lockDir}`);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      fs.rmdirSync(lockDir);
+    } catch {}
+  }
+}
+
+function entryKey(entry: InstanceEntry): string {
+  return `${entry.project}|${entry.pid}`;
+}
+
 /** Reads the registry, pruning any entry whose pid or port is no longer live. */
 export async function readRegistry(): Promise<InstanceEntry[]> {
   const entries = readRaw();
@@ -97,7 +133,11 @@ export async function readRegistry(): Promise<InstanceEntry[]> {
   for (const entry of entries) {
     if (await isLive(entry)) live.push(entry);
   }
-  if (live.length !== entries.length) writeRaw(live);
+  if (live.length !== entries.length) {
+    const liveKeys = new Set(live.map(entryKey));
+    const deadKeys = new Set(entries.map(entryKey).filter((k) => !liveKeys.has(k)));
+    await withLock(() => writeRaw(readRaw().filter((e) => !deadKeys.has(entryKey(e)))));
+  }
   return live;
 }
 
@@ -107,18 +147,20 @@ export async function findLiveEntry(project: string): Promise<InstanceEntry | un
 }
 
 export async function upsertEntry(entry: InstanceEntry): Promise<void> {
-  const entries = await readRegistry();
-  const filtered = entries.filter((e) => e.project !== entry.project);
-  filtered.push(entry);
-  writeRaw(filtered);
+  await withLock(() => {
+    const filtered = readRaw().filter((e) => e.project !== entry.project);
+    filtered.push(entry);
+    writeRaw(filtered);
+  });
 }
 
 export async function removeEntry(project: string): Promise<InstanceEntry | undefined> {
-  const entries = await readRegistry();
-  const found = entries.find((e) => e.project === project);
-  const remaining = entries.filter((e) => e.project !== project);
-  writeRaw(remaining);
-  return found;
+  return withLock(() => {
+    const entries = readRaw();
+    const found = entries.find((e) => e.project === project);
+    writeRaw(entries.filter((e) => e.project !== project));
+    return found;
+  });
 }
 
 export function pickFreePort(): Promise<number> {
