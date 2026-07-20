@@ -1,2 +1,4 @@
 node_modules/
 dist/
+sea-bundle.js
+sea-prep.blob
